@@ -1,0 +1,125 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+## Setup
+```{r}
+# first, source our libraries
+source(here::here("libraries.R"))
+
+# download our data from mlbench and take a peek at it
+df_trees <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-01-28/sf_trees.csv")
+glimpse(df_trees) # 5 numerics, 7 chars, legal_status is our target
+```
+
+## Splitting Our Data
+```{r}
+# create our split
+split_trees <- initial_split(df_trees, strata = legal_status) # specify stratification 
+
+# split into train and test
+train_trees <- training(split_trees)
+test_trees <- testing(split_trees)
+```
+
+## Build a recipe
+
+```{r}
+# create a recipe object which we will use as an input into our tidymodels functions
+rec_trees <- recipe(legal_status ~ ., data = train_trees) %>%
+  # update tree_id's "role" so we don't have to drop it 
+  update_role(tree_id, new_role = "ID") %>%
+  # groups any factor level that is represented in 1% or less of the data into "other"
+  step_other(species, caretaker, threshold = 0.01) %>%
+  # same as above, but for site_info and at 0.05% 
+  step_other(site_info, threshold = 0.005) %>%
+  # dummify all char vars, excluding our outcome (legal_status)
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  # convert the date to numeric years
+  step_date(date, features = c("year")) %>%
+  # remove original date variable
+  step_rm(date) %>%
+  # ???
+  step_downsample(legal_status)
+
+# # the code defining our recipe only defined it; to execute it we have to run prep()
+# trees_prep <- prep(rec_trees) # cannot allocate vector of size 39.1 gb?
+# 
+# # and to get the altered data out we have to juice() the prepped recipe
+# trees_juiced <- juice(tree_prep)
+```
+
+## Generate our models with any parameters we want to tune
+```{r}
+# svm
+mod_svm_trees <-
+  # choose the model and any hyperparameters we want to tune
+  svm_rbf(cost = tune(), rbf_sigma = tune()) %>%
+  # set whether its for classification or regression
+  set_mode("classification") %>%
+  # set the engine as whatever underlying package we want to run the formula 
+  set_engine("kernlab")
+
+```
+
+## Put our recipe and model together into a workflow object
+```{r}
+# save a workflow object
+wf_trees <- 
+  # call workflow() to set up the skeleton
+  workflow() %>% 
+  # add a recipe
+  add_recipe(rec_trees) %>% 
+  # add a model
+  add_model(mod_svm_trees)
+```
+
+## Set additional tuning parameters
+```{r}
+# set a seed
+set.seed(19)
+
+# OPTIONAL: cross-validation 
+folds_trees <- rsample::vfold_cv(train_trees)
+
+# OPTIONAL: tuning grid numbers
+grid_trees <- 20 
+
+# # OPTIONAL: parallelization plan
+# plan(multisession)
+# availableCores() # check available cores
+
+## NOTE: Multicore sessions and parallelization work on almost every operating system EXCEPT
+## for Windows! 
+```
+
+## Execute tuning
+```{r}
+
+# # create and execute our tuning formula
+# tuning_trees %<-% {
+#   # specify a model that we have already defined
+#   mod_svm %>%
+#   # set our tuning grid to our parameters of interest
+#   tune_grid(
+#     iono_rec,
+#     resamples = folds_trees,
+#     control = tree_grid
+#   )
+# }
+
+# create and execute our tuning formula
+tuning_trees <- mod_svm %>%
+  # set our tuning grid to our parameters of interest
+  tune_grid(
+    rec_trees,
+    resamples = folds_trees,
+    grid = grid_trees
+  )
+```
+
+
+
+
+
