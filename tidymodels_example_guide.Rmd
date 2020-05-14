@@ -9,11 +9,36 @@ output: html_notebook
 source(here::here("libraries.R"))
 
 # download our data from mlbench and take a peek at it
-df_trees <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-01-28/sf_trees.csv")
-glimpse(df_trees) # 5 numerics, 7 chars, legal_status is our target
+df_trees_raw <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-01-28/sf_trees.csv")
+glimpse(df_trees_raw) # 5 numerics, 7 chars, legal_status is our target
 ```
 
-## Splitting Our Data
+
+## Clean the data 
+```{r}
+
+# generate our cleaned data 
+df_trees <- df_trees_raw %>% 
+  # clean var names
+  clean_names() %>% 
+  # make target binary
+  mutate(legal_status = case_when(
+    legal_status == "DPW Maintained" ~ "DPW_Maintained",
+    TRUE ~ "Other"
+  )) %>% 
+  # get just raw numbers and drop $, ., other symbols
+  mutate(plot_size = parse_number(plot_size)) %>% 
+  # drop a useless column
+  select(-address) %>% 
+  # drop NAs 
+  na.omit() %>% 
+  # make chars factors 
+  mutate_if(is.character, factor)
+
+```
+
+
+## Split the data
 ```{r}
 # create our split
 split_trees <- initial_split(df_trees, strata = legal_status) # specify stratification 
@@ -40,26 +65,67 @@ rec_trees <- recipe(legal_status ~ ., data = train_trees) %>%
   step_date(date, features = c("year")) %>%
   # remove original date variable
   step_rm(date) %>%
-  # ???
-  step_downsample(legal_status)
+  # remove zero-variance predictors (with all same values)
+  step_nzv(all_predictors())
 
-# # the code defining our recipe only defined it; to execute it we have to run prep()
-# trees_prep <- prep(rec_trees) # cannot allocate vector of size 39.1 gb?
-# 
-# # and to get the altered data out we have to juice() the prepped recipe
-# trees_juiced <- juice(tree_prep)
+# the code defining our recipe only defined it; to execute it we have to run prep()
+prep_trees <- prep(rec_trees) 
+
+# testing
+testing_trees <- prep_trees %>% 
+  bake(testing(split_trees))
+
+# pull out our truth column for later joining
+testing_truth_trees <- testing_trees %>% 
+  select(legal_status)
+
+# and to get the altered data out we have to juice() the prepped recipe
+juiced_trees <- juice(prep_trees)
 ```
+
+## Build a simple model
+```{r}
+mod_forest_trees <- rand_forest() %>% 
+  set_mode("classification") %>% 
+  set_engine("ranger") 
+```
+
+## Fit the simple model 
+```{r}
+fit_forest_trees <- mod_forest_trees %>% 
+  fit(legal_status ~., data = juiced_trees)
+  
+```
+
+## Generate predictions with the simple model
+```{r}
+
+# get our predictions and save the results into a dataframe 
+preds_forest_trees <- fit_forest_trees %>% 
+  predict(testing_trees, type = "prob") %>% 
+  bind_cols(testing_truth_trees) %>%
+  mutate(pred_class = if_else(.[, 1] > .[, 2], "DPW_Maintained", "Other")) %>% 
+  select(everything(),legal_status)
+
+# get our AUC
+preds_forest_trees %>% 
+  roc_auc(truth = legal_status, .pred_Other)
+```
+
+
+
+
 
 ## Generate our models with any parameters we want to tune
 ```{r}
-# svm
-mod_svm_trees <-
-  # choose the model and any hyperparameters we want to tune
-  svm_rbf(cost = tune(), rbf_sigma = tune()) %>%
-  # set whether its for classification or regression
+# random forest
+mod_forest_trees <- rand_forest(
+  mtry = tune(),
+  trees = 1000,
+  min_n = tune()
+) %>%
   set_mode("classification") %>%
-  # set the engine as whatever underlying package we want to run the formula 
-  set_engine("kernlab")
+  set_engine("ranger")
 
 ```
 
@@ -72,7 +138,7 @@ wf_trees <-
   # add a recipe
   add_recipe(rec_trees) %>% 
   # add a model
-  add_model(mod_svm_trees)
+  add_model(mod_forest_trees)
 ```
 
 ## Set additional tuning parameters
@@ -81,10 +147,14 @@ wf_trees <-
 set.seed(19)
 
 # OPTIONAL: cross-validation 
-folds_trees <- rsample::vfold_cv(train_trees)
+folds_trees <- rsample::vfold_cv(train_trees, v = 5)
 
 # OPTIONAL: tuning grid numbers
-grid_trees <- 20 
+grid_trees <- 
+  grid_regular(
+    mtry(range = c(2, 10)),
+    min_n(range = c(2, 10)),
+    levels = 7)
 
 # # OPTIONAL: parallelization plan
 # plan(multisession)
@@ -92,31 +162,37 @@ grid_trees <- 20
 
 ## NOTE: Multicore sessions and parallelization work on almost every operating system EXCEPT
 ## for Windows! 
+# model 28/49: Error in ranger::ranger(formula = formula, data = data, mtry = ~10L, num.trees = ~1000, : U...
 ```
 
 ## Execute tuning
 ```{r}
 
 # # create and execute our tuning formula
-# tuning_trees %<-% {
-#   # specify a model that we have already defined
-#   mod_svm %>%
+# tic()
+# tuning_trees_multi %<-% {
 #   # set our tuning grid to our parameters of interest
 #   tune_grid(
-#     iono_rec,
+#     wf_trees,
 #     resamples = folds_trees,
-#     control = tree_grid
+#     grid = grid_trees # 216 seconds, 2 grid points, 10-fold CV
 #   )
 # }
+# toc()
+
 
 # create and execute our tuning formula
-tuning_trees <- mod_svm %>%
+tic()
+tuning_trees <- 
   # set our tuning grid to our parameters of interest
   tune_grid(
-    rec_trees,
+    wf_trees,
     resamples = folds_trees,
-    grid = grid_trees
+    grid = grid_trees # 216 seconds, 2 grid points, 10-fold CV, almost exactly half with v = 5 
   )
+toc()
+tuning_trees %>% 
+  collect_metrics()
 ```
 
 
